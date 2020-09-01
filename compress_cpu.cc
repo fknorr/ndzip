@@ -11,6 +11,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#define NOINLINE
+
 inline uint32_t load(const void *addr) {
     uint32_t v;
     __builtin_memcpy(&v, addr, sizeof v);
@@ -46,17 +48,31 @@ void xt_step(T *x, size_t n, size_t s) {
 }
 
 template<typename T>
-[[gnu::noinline]]
+NOINLINE
 void xt3d_0(T *x, size_t n, size_t m, size_t l) {
+    constexpr size_t block = 16;
     for (size_t i = 0; i < n*m*l; i += m*l) {
-        for (size_t j = 0; j < m; ++j) {
+        for (size_t j = 0; j < m/block*block; j += block) {
+            T a[block], b[block];
+            for (size_t h = 0; h < block; ++h) {
+                b[h] = x[i+j+h];
+            }
+            for (size_t k = 1; k < l; ++k) {
+                for (size_t h = 0; h < block; ++h) {
+                    a[h] = b[h];
+                    b[h] = x[i+j+h + k*n];
+                    x[i+j+h + k*n] = a[h] ^ b[h];
+                }
+            }
+        }
+        for (size_t j = m/block*block; j < m; ++j) {
             xt_step(x + i + j, l, n);
         }
     }
 }
 
 template<typename T>
-[[gnu::noinline]]
+NOINLINE
 void xt3d_1(T *x, size_t n, size_t m, size_t l) {
     for (size_t i = 0; i < n*m*l; i += n) {
         xt_step(x + i, m, 1);
@@ -64,15 +80,38 @@ void xt3d_1(T *x, size_t n, size_t m, size_t l) {
 }
 
 template<typename T>
-[[gnu::noinline]]
+NOINLINE
 void xt3d_2(T *x, size_t n, size_t m, size_t l) {
-    for (size_t i = 0; i < n*m; ++i) {
-        xt_step(x + i, m, l*n);
+    auto s = l*n;
+    constexpr size_t block = 8;
+    for (size_t i = 0; i < n*m/block*block; i += block) {
+        T a[block], b[block];
+        for (size_t j = 0; j < block; ++j) {
+            b[j] = x[i+j];
+        }
+        for (size_t k = 1; k < m; ++k) {
+            for (size_t j = 0; j < block; ++j) {
+                a[j] = b[j];
+                b[j] = x[i+j + k*s];
+                x[i+j + k*s] = a[j] ^ b[j];
+            }
+        }
+    }
+    for (size_t j = n*m/block*block; j < n*m; ++j) {
+        xt_step(x+j, m, s);
     }
 }
 
 
-[[gnu::noinline]]
+template<typename T>
+void xt3d(T *x, size_t n, size_t m, size_t l) {
+    xt3d_0(x, n, m, l);
+    xt3d_1(x, n, m, l);
+    xt3d_2(x, n, m, l);
+}
+
+
+NOINLINE
 size_t writev(uint32_t *vs, char *out0) {
     auto out = out0;
     for (unsigned i = 0; i < 64; i += 2) {
@@ -133,14 +172,12 @@ int main(int argc, char **argv) {
 
     struct stat stat_in;
     if (fstat(fd_in, &stat_in) == -1) die("stat");
+    auto in_size = static_cast<size_t>(stat_in.st_size);
 
-    auto buf_in = static_cast<uint32_t*>(malloc(stat_in.st_size+64*4));
-    if (read(fd_in, buf_in, stat_in.st_size) != stat_in.st_size) die("read");
-    if (close(fd_in) == -1) die("close");
+    auto buf_in = static_cast<uint32_t*>(mmap(NULL, in_size, PROT_READ|PROT_WRITE, MAP_PRIVATE, fd_in, 0));
+    if (buf_in == MAP_FAILED) die("mmap");
 
-    xt3d_0(buf_in, n, m, l);
-    xt3d_1(buf_in, n, m, l);
-    xt3d_2(buf_in, n, m, l);
+    xt3d(buf_in, n, m, l);
 
     auto fd_out = open(fn_out, O_RDWR|O_CREAT, 0666);
     if (fd_out == -1) die("open");
@@ -156,8 +193,14 @@ int main(int argc, char **argv) {
         o += writev(buf_in + i, o);
     }
 
+    auto out_size = o-static_cast<char*>(buf_out);
+
     if (munmap(buf_out, out_maxsize) == -1) die("munmap");
-    if (ftruncate(fd_out, o-static_cast<char*>(buf_out)) == -1) die("ftruncate");
+    if (ftruncate(fd_out, out_size) == -1) die("ftruncate");
     if (close(fd_out) == -1) die("close");
+    if (munmap(buf_in, in_size) == -1) die("munmap");
+    if (close(fd_in) == -1) die("close");
+
+    printf("%zu => %zu (ratio %.4g)\n", in_size, out_size, double(in_size)/out_size);
 }
 
