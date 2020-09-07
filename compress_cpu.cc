@@ -167,14 +167,14 @@ void xt3d_1(T *x, size_t n, size_t m, size_t l) {
 template<typename T>
 NOINLINE
 void xt3d_2(T *x, size_t n, size_t m, size_t l) {
-    auto s = l*n;
+    auto s = n*m;
     constexpr size_t block = 8;
     for (size_t i = 0; i < n*m/block*block; i += block) {
         T a[block], b[block];
         for (size_t j = 0; j < block; ++j) {
             b[j] = x[i+j];
         }
-        for (size_t k = 1; k < m; ++k) {
+        for (size_t k = 1; k < l; ++k) {
             for (size_t j = 0; j < block; ++j) {
                 a[j] = b[j];
                 b[j] = x[i+j + k*s];
@@ -183,7 +183,7 @@ void xt3d_2(T *x, size_t n, size_t m, size_t l) {
         }
     }
     for (size_t j = n*m/block*block; j < n*m; ++j) {
-        xt_step(x+j, m, s);
+        xt_step(x+j, l, s);
     }
 }
 
