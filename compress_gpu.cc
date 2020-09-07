@@ -49,77 +49,6 @@ void xt_step(T *x, size_t n, size_t s) {
     }
 }
 
-template<typename T>
-NOINLINE
-void xt3d_0_step(T *x, size_t n, size_t m, size_t l, size_t i) {
-    constexpr size_t block = 16;
-    for (size_t j = 0; j < m/block*block; j += block) {
-        T a[block], b[block];
-        for (size_t h = 0; h < block; ++h) {
-            b[h] = x[i+j+h];
-        }
-        for (size_t k = 1; k < l; ++k) {
-            for (size_t h = 0; h < block; ++h) {
-                a[h] = b[h];
-                b[h] = x[i+j+h + k*n];
-                x[i+j+h + k*n] = a[h] ^ b[h];
-            }
-        }
-    }
-    for (size_t j = m/block*block; j < m; ++j) {
-        xt_step(x + i + j, l, n);
-    }
-}
-
-template<typename T>
-NOINLINE
-void xt3d_1_step(T *x, size_t n, size_t m, size_t l, size_t i) {
-    xt_step(x + i, m, 1);
-}
-
-template<typename T>
-NOINLINE
-void xt3d_2_step_a(T *x, size_t n, size_t m, size_t l, size_t i) {
-    auto s = l*n;
-    constexpr size_t block = 8;
-    T a[block], b[block];
-    for (size_t j = 0; j < block; ++j) {
-        b[j] = x[i+j];
-    }
-    for (size_t k = 1; k < m; ++k) {
-        for (size_t j = 0; j < block; ++j) {
-            a[j] = b[j];
-            b[j] = x[i+j + k*s];
-            x[i+j + k*s] = a[j] ^ b[j];
-        }
-    }
-}
-
-template<typename T>
-NOINLINE
-void xt3d_2_step_b(T *x, size_t n, size_t m, size_t l, size_t j) {
-    auto s = l*n;
-    xt_step(x+j, m, s);
-}
-
-
-template<typename T>
-void xt3d(T *x, size_t n, size_t m, size_t l) {
-    for (size_t i = 0; i < n*m*l; i += m*l) {
-        xt3d_0_step(x, n, m, l, i);
-    }
-    for (size_t i = 0; i < n*m*l; i += n) {
-        xt3d_1_step(x, n, m, l, i);
-    }
-    constexpr size_t block = 8;
-    for (size_t i = 0; i < n*m/block*block; i += block) {
-        xt3d_2_step_a(x, n, m, l, i);
-    }
-    for (size_t j = n*m/block*block; j < n*m; ++j) {
-        xt3d_2_step_b(x, n, m, l, j);
-    }
-}
-
 
 NOINLINE
 size_t writev(uint32_t *vs, char *out0) {
@@ -192,7 +121,7 @@ int main(int argc, char **argv) {
     sycl::queue q;
     q.submit([&](sycl::handler &cgh) {
         auto buf_acc = buf_in.get_access<sycl::access::mode::read_write>(cgh);
-        cgh.parallel_for(sycl::range<2>{n, m}, [buf_acc, n, m, l](sycl::item<2> item) {
+        cgh.parallel_for<class xt3d_1>(sycl::range<2>{n, m}, [buf_acc, n, m, l](sycl::item<2> item) {
             auto x = static_cast<uint32_t*>(buf_acc.get_pointer());
             auto i = m*l*item[0];
             auto j = item[1];
@@ -201,7 +130,7 @@ int main(int argc, char **argv) {
     });
     q.submit([&](sycl::handler &cgh) {
         auto buf_acc = buf_in.get_access<sycl::access::mode::read_write>(cgh);
-        cgh.parallel_for(sycl::range<1>{m*l}, [buf_acc, n, m, l](sycl::item<1> item) {
+        cgh.parallel_for<class xt3d_2>(sycl::range<1>{m*l}, [buf_acc, n, m, l](sycl::item<1> item) {
             auto x = static_cast<uint32_t*>(buf_acc.get_pointer());
             auto i = n*item[0];
             xt_step(x+i, m, 1);
@@ -209,7 +138,7 @@ int main(int argc, char **argv) {
     });
     q.submit([&](sycl::handler &cgh) {
         auto buf_acc = buf_in.get_access<sycl::access::mode::read_write>(cgh);
-        cgh.parallel_for(sycl::range<1>{n*m}, [buf_acc, n, m, l](sycl::item<1> item) {
+        cgh.parallel_for<class xt3d_3>(sycl::range<1>{n*m}, [buf_acc, n, m, l](sycl::item<1> item) {
             auto x = static_cast<uint32_t*>(buf_acc.get_pointer());
             auto i = item[0];
             xt_step(x+i, m, l*n);
