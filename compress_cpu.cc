@@ -11,7 +11,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define NOINLINE
+#define NOINLINE [[gnu::noinline]]
 
 
 template<typename T>
@@ -105,6 +105,8 @@ void xt_step(T *x, size_t n, size_t s) {
     }
 }
 
+constexpr unsigned block = 8;
+
 template<typename T>
 void xt1d(T *x, size_t n) {
     xt_step(x, n, 1);
@@ -113,15 +115,41 @@ void xt1d(T *x, size_t n) {
 template<typename T>
 NOINLINE
 void xt2d_0(T *x, size_t n, size_t m) {
-    for (size_t i = 0; i < n*m; i += m) {
-        xt_step(x + i, m, 1);
+    for (size_t i = 0; i < n/block*block; i += block) {
+        T a[block], b[block];
+        for (size_t j = 0; j < block; ++j) {
+            b[j] = x[(i+j)*m];
+        }
+        for (size_t k = 1; k < m; ++k) {
+            for (size_t j = 0; j < block; ++j) {
+                a[j] = b[j];
+                b[j] = x[(i+j)*m+k];
+                x[(i+j)*m+k] = a[j] ^ b[j];
+            }
+        }
+    }
+    for (size_t i = n/block*block; i < n; ++i) {
+        xt_step(x + i*m, m, 1);
     }
 }
 
 template<typename T>
 NOINLINE
 void xt2d_1(T *x, size_t n, size_t m) {
-    for (size_t i = 0; i < m; ++i) {
+    for (size_t i = 0; i < m/block*block; i += block) {
+        T a[block], b[block];
+        for (size_t j = 0; j < block; ++j) {
+            b[j] = x[i+j];
+        }
+        for (size_t k = 1; k < n; ++k) {
+            for (size_t j = 0; j < block; ++j) {
+                a[j] = b[j];
+                b[j] = x[i+j+k*m];
+                x[i+j+k*m] = a[j] ^ b[j];
+            }
+        }
+    }
+    for (size_t i = m/block*block; i < m; ++i) {
         xt_step(x + i, n, m);
     }
 }
@@ -135,17 +163,43 @@ void xt2d(T *x, size_t n, size_t m) {
 template<typename T>
 NOINLINE
 void xt3d_0(T *x, size_t n, size_t m, size_t l) {
-    for (size_t i = 0; i < n*m*l; i += l) {
-        xt_step(x + i, l, 1);
+    for (size_t i = 0; i < n*m/block*block; i += block) {
+        T a[block], b[block];
+        for (size_t j = 0; j < block; ++j) {
+            b[j] = x[(i+j)*l];
+        }
+        for (size_t k = 1; k < l; ++k) {
+            for (size_t j = 0; j < block; ++j) {
+                a[j] = b[j];
+                b[j] = x[(i+j)*l+k];
+                x[(i+j)*l+k] = a[j] ^ b[j];
+            }
+        }
+    }
+    for (size_t i = n*m/block*block; i < n*m; ++i) {
+        xt_step(x + i*l, l, 1);
     }
 }
 
 template<typename T>
 NOINLINE
 void xt3d_1(T *x, size_t n, size_t m, size_t l) {
-    for (size_t i = 0; i < n*m*l; i += m*l) {
-        for (size_t j = 0; j < l; ++j) {
-            xt_step(x + i + j, m, l);
+    for (size_t i = 0; i < n; ++i) {
+        for (size_t j = 0; j < l/block*block; j += block) {
+            T a[block], b[block];
+            for (size_t k = 0; k < block; ++k) {
+                b[k] = x[i*m*l+j+k];
+            }
+            for (size_t h = 1; h < m; ++h) {
+                for (size_t k = 0; k < block; ++k) {
+                    a[k] = b[k];
+                    b[k] = x[i*m*l+j+k+h*l];
+                    x[i*m*l+j+k+h*l] = a[k] ^ b[k];
+                }
+            }
+        }
+        for (size_t j = l/block*block; j < l; ++j) {
+            xt_step(x + i*m*l + j, m, l);
         }
     }
 }
@@ -153,7 +207,20 @@ void xt3d_1(T *x, size_t n, size_t m, size_t l) {
 template<typename T>
 NOINLINE
 void xt3d_2(T *x, size_t n, size_t m, size_t l) {
-    for (size_t i = 0; i < m*l; ++i) {
+    for (size_t i = 0; i < m*l/block*block; i += block) {
+        T a[block], b[block];
+        for (size_t j = 0; j < block; ++j) {
+            b[j] = x[i+j];
+        }
+        for (size_t j = 0; j < block; ++j) {
+            for (size_t k = 1; k < n; ++k) {
+                a[j] = b[j];
+                b[j] = x[i+j+k*m*l];
+                x[i+j+k*m*l] = a[j] ^ b[j];
+            }
+        }
+    }
+    for (size_t i = m*l/block*block; i < m*l; ++i) {
         xt_step(x + i, n, m*l);
     }
 }
