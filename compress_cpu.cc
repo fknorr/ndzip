@@ -135,55 +135,26 @@ void xt2d(T *x, size_t n, size_t m) {
 template<typename T>
 NOINLINE
 void xt3d_0(T *x, size_t n, size_t m, size_t l) {
-    constexpr size_t block = 16;
-    for (size_t i = 0; i < n*m*l; i += m*l) {
-        for (size_t j = 0; j < m/block*block; j += block) {
-            T a[block], b[block];
-            for (size_t h = 0; h < block; ++h) {
-                b[h] = x[i+j+h];
-            }
-            for (size_t k = 1; k < l; ++k) {
-                for (size_t h = 0; h < block; ++h) {
-                    a[h] = b[h];
-                    b[h] = x[i+j+h + k*n];
-                    x[i+j+h + k*n] = a[h] ^ b[h];
-                }
-            }
-        }
-        for (size_t j = m/block*block; j < m; ++j) {
-            xt_step(x + i + j, l, n);
-        }
+    for (size_t i = 0; i < n*m*l; i += l) {
+        xt_step(x + i, l, 1);
     }
 }
 
 template<typename T>
 NOINLINE
 void xt3d_1(T *x, size_t n, size_t m, size_t l) {
-    for (size_t i = 0; i < n*m*l; i += n) {
-        xt_step(x + i, m, 1);
+    for (size_t i = 0; i < n*m*l; i += m*l) {
+        for (size_t j = 0; j < l; ++j) {
+            xt_step(x + i + j, m, l);
+        }
     }
 }
 
 template<typename T>
 NOINLINE
 void xt3d_2(T *x, size_t n, size_t m, size_t l) {
-    auto s = n*m;
-    constexpr size_t block = 8;
-    for (size_t i = 0; i < n*m/block*block; i += block) {
-        T a[block], b[block];
-        for (size_t j = 0; j < block; ++j) {
-            b[j] = x[i+j];
-        }
-        for (size_t k = 1; k < l; ++k) {
-            for (size_t j = 0; j < block; ++j) {
-                a[j] = b[j];
-                b[j] = x[i+j + k*s];
-                x[i+j + k*s] = a[j] ^ b[j];
-            }
-        }
-    }
-    for (size_t j = n*m/block*block; j < n*m; ++j) {
-        xt_step(x+j, l, s);
+    for (size_t i = 0; i < m*l; ++i) {
+        xt_step(x + i, n, m*l);
     }
 }
 
@@ -194,7 +165,6 @@ void xt3d(T *x, size_t n, size_t m, size_t l) {
     xt3d_1(x, n, m, l);
     xt3d_2(x, n, m, l);
 }
-
 
 NOINLINE
 size_t writev(uint32_t *vs, char *out0) {
@@ -263,15 +233,12 @@ int main(int argc, char **argv) {
     auto buf_in = static_cast<uint32_t*>(mmap(NULL, in_size, PROT_READ|PROT_WRITE, MAP_PRIVATE, fd_in, 0));
     if (buf_in == MAP_FAILED) die("mmap");
 
-    for (size_t i = 0; i < n*m*l; ++i) {
-        buf_in[i] = positional_bits_repr<float>::to_bits(buf_in[i]);
-    }
     if (dims == 1) {
         xt1d(buf_in, n);
     } else if (dims == 2) {
         xt2d(buf_in, n, m);
     } else {
-        xt3d(buf_in, l, m, n);
+        xt3d(buf_in, n, m, l);
     }
 
     auto fd_out = open(fn_out, O_RDWR|O_CREAT, 0666);

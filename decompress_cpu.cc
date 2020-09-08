@@ -11,6 +11,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#define NOINLINE
+
 inline uint32_t load(const void *addr) {
     uint32_t v;
     __builtin_memcpy(&v, addr, sizeof v);
@@ -41,33 +43,66 @@ void ixt_step(T *x, size_t n, size_t s) {
 }
 
 template<typename T>
-[[gnu::noinline]]
-void ixt3d_0(T *x, size_t n, size_t m, size_t l) {
-    for (size_t i = 0; i < n*m*l; i += m*l) {
-        for (size_t j = 0; j < m; ++j) {
-            ixt_step(x + i + j, l, n);
-        }
-    }
+void ixt1d(T *x, size_t n) {
+    ixt_step(x, n, 1);
 }
 
 template<typename T>
-[[gnu::noinline]]
-void ixt3d_1(T *x, size_t n, size_t m, size_t l) {
-    for (size_t i = 0; i < n*m*l; i += n) {
+NOINLINE
+void ixt2d_0(T *x, size_t n, size_t m) {
+    for (size_t i = 0; i < n*m; i += m) {
         ixt_step(x + i, m, 1);
     }
 }
 
 template<typename T>
-[[gnu::noinline]]
-void ixt3d_2(T *x, size_t n, size_t m, size_t l) {
-    for (size_t i = 0; i < n*m; ++i) {
-        ixt_step(x + i, m, l*n);
+NOINLINE
+void ixt2d_1(T *x, size_t n, size_t m) {
+    for (size_t i = 0; i < m; ++i) {
+        ixt_step(x + i, n, m);
     }
 }
 
+template<typename T>
+void ixt2d(T *x, size_t n, size_t m) {
+    ixt2d_0(x, n, m);
+    ixt2d_1(x, n, m);
+}
 
-[[gnu::noinline]]
+template<typename T>
+NOINLINE
+void ixt3d_0(T *x, size_t n, size_t m, size_t l) {
+    for (size_t i = 0; i < n*m*l; i += l) {
+        ixt_step(x + i, l, 1);
+    }
+}
+
+template<typename T>
+NOINLINE
+void ixt3d_1(T *x, size_t n, size_t m, size_t l) {
+    for (size_t i = 0; i < n*m*l; i += m*l) {
+        for (size_t j = 0; j < l; ++j) {
+            ixt_step(x + i + j, m, l);
+        }
+    }
+}
+
+template<typename T>
+NOINLINE
+void ixt3d_2(T *x, size_t n, size_t m, size_t l) {
+    for (size_t i = 0; i < m*l; ++i) {
+        ixt_step(x + i, n, m*l);
+    }
+}
+
+template<typename T>
+void ixt3d(T *x, size_t n, size_t m, size_t l) {
+    ixt3d_0(x, n, m, l);
+    ixt3d_1(x, n, m, l);
+    ixt3d_2(x, n, m, l);
+}
+
+NOINLINE
 size_t readv(uint32_t *vs, const char *in) {
     auto head = in;
     auto body = in + 32;
@@ -111,8 +146,9 @@ int main(int argc, char **argv) {
     auto fn_in = argv[1];
     auto fn_out = argv[2];
     auto n = (unsigned)atoi(argv[3]);
-    auto m = (unsigned)atoi(argv[4]);
-    auto l = (unsigned)atoi(argv[5]);
+    size_t m = argc > 4 ? (unsigned)atoi(argv[4]) : 1;
+    size_t l = argc > 5 ? (unsigned)atoi(argv[5]) : 1;
+    unsigned dims = argc - 3;
 
     auto fd_in = open(fn_in, O_RDONLY);
     if (fd_in == -1) die("open");
@@ -137,9 +173,13 @@ int main(int argc, char **argv) {
         o += readv(buf_out + i, o);
     }
 
-    ixt3d_0(buf_out, n, m, l);
-    ixt3d_1(buf_out, n, m, l);
-    ixt3d_2(buf_out, n, m, l);
+    if (dims == 1) {
+        ixt1d(buf_out, n);
+    } else if (dims == 2) {
+        ixt2d(buf_out, n, m);
+    } else {
+        ixt3d(buf_out, n, m, l);
+    }
 
     if (munmap(buf_out, out_size) == -1) die("munmap");
     if (close(fd_out) == -1) die("close");
