@@ -49,9 +49,40 @@ void xt_step(T *x, size_t n, size_t s) {
     }
 }
 
+template<typename T, unsigned Dim> class xt3d_kernel;
+
+template<typename T>
+void xt3d(sycl::queue &q, sycl::buffer<T, 1> &buf, size_t n, size_t m, size_t l) {
+    q.submit([&](sycl::handler &cgh) {
+        auto acc = buf.template get_access<sycl::access::mode::read_write>(cgh);
+        cgh.parallel_for<xt3d_kernel<T, 1>>(sycl::range<1>{n*m}, [acc, n, m, l](sycl::item<1> item) {
+            auto x = static_cast<uint32_t*>(acc.get_pointer());
+            auto i = l*item[0];
+            xt_step(x+i, l, 1);
+        });
+    });
+    q.submit([&](sycl::handler &cgh) {
+        auto acc = buf.template get_access<sycl::access::mode::read_write>(cgh);
+        cgh.parallel_for<xt3d_kernel<T, 0>>(sycl::range<2>{n, l}, [acc, n, m, l](sycl::item<2> item) {
+            auto x = static_cast<uint32_t*>(acc.get_pointer());
+            auto i = m*l*item[0];
+            auto j = item[1];
+            xt_step(x+i+j, m, l);
+        });
+    });
+    q.submit([&](sycl::handler &cgh) {
+        auto acc = buf.template get_access<sycl::access::mode::read_write>(cgh);
+        cgh.parallel_for<xt3d_kernel<T, 2>>(sycl::range<1>{m*l}, [acc, n, m, l](sycl::item<1> item) {
+            auto x = static_cast<uint32_t*>(acc.get_pointer());
+            auto i = item[0];
+            xt_step(x+i, n, m*l);
+        });
+    });
+}
+
 
 NOINLINE
-size_t writev(uint32_t *vs, char *out0) {
+size_t writev(const uint32_t *vs, char *out0) {
     auto out = out0;
     for (unsigned i = 0; i < 64; i += 2) {
         unsigned length_codes[2];
@@ -116,57 +147,53 @@ int main(int argc, char **argv) {
     auto mem_in = static_cast<uint32_t*>(mmap(NULL, in_size, PROT_READ|PROT_WRITE, MAP_PRIVATE, fd_in, 0));
     if (mem_in == MAP_FAILED) die("mmap");
 
-    sycl::buffer<uint32_t, 1> buf_in(mem_in, n*m*l);
-
-    sycl::queue q;
-    q.submit([&](sycl::handler &cgh) {
-        auto buf_acc = buf_in.get_access<sycl::access::mode::read_write>(cgh);
-        cgh.parallel_for<class xt3d_1>(sycl::range<2>{n, m}, [buf_acc, n, m, l](sycl::item<2> item) {
-            auto x = static_cast<uint32_t*>(buf_acc.get_pointer());
-            auto i = m*l*item[0];
-            auto j = item[1];
-            xt_step(x+i+j, l, n);
-        });
-    });
-    q.submit([&](sycl::handler &cgh) {
-        auto buf_acc = buf_in.get_access<sycl::access::mode::read_write>(cgh);
-        cgh.parallel_for<class xt3d_2>(sycl::range<1>{m*l}, [buf_acc, n, m, l](sycl::item<1> item) {
-            auto x = static_cast<uint32_t*>(buf_acc.get_pointer());
-            auto i = n*item[0];
-            xt_step(x+i, m, 1);
-        });
-    });
-    q.submit([&](sycl::handler &cgh) {
-        auto buf_acc = buf_in.get_access<sycl::access::mode::read_write>(cgh);
-        cgh.parallel_for<class xt3d_3>(sycl::range<1>{n*m}, [buf_acc, n, m, l](sycl::item<1> item) {
-            auto x = static_cast<uint32_t*>(buf_acc.get_pointer());
-            auto i = item[0];
-            xt_step(x+i, m, l*n);
-        });
-    });
-    q.submit([&](sycl::handler &cgh) {
-        auto buf_acc = buf_in.get_access<sycl::access::mode::read_write>(cgh);
-        cgh.update_host(buf_acc);
-    });
-    q.wait();
-
     auto fd_out = open(fn_out, O_RDWR|O_CREAT, 0666);
     if (fd_out == -1) die("open");
 
     size_t out_maxsize = n*m*l*5;
     if (ftruncate(fd_out, out_maxsize) == -1) die("ftruncate");
 
-    auto buf_out = mmap(NULL, out_maxsize, PROT_READ|PROT_WRITE, MAP_SHARED, fd_out, 0);
-    if (buf_out == MAP_FAILED) die("mmap");
+    auto mem_out = static_cast<char*>(mmap(NULL, out_maxsize, PROT_READ|PROT_WRITE, MAP_SHARED, fd_out, 0));
+    if (mem_out == MAP_FAILED) die("mmap");
 
-    auto o = static_cast<char*>(buf_out);
-    for (size_t i = 0; i < n*m*l; i += 64) {
-        o += writev(mem_in + i, o);
+    sycl::buffer<uint32_t, 1> buf_in(mem_in, n*m*l);
+
+    {
+        sycl::queue q;
+        xt3d(q, buf_in, n, m, l);
+
+        sycl::buffer<char, 1> buf_out(mem_out, out_maxsize);
+
+        q.submit([&](sycl::handler &cgh) {
+            auto acc_out = buf_out.get_access<sycl::access::mode::discard_write>(cgh);
+            cgh.fill(acc_out, char{});
+        });
+        q.submit([&](sycl::handler &cgh) {
+            auto acc_in = buf_in.get_access<sycl::access::mode::read>(cgh);
+            auto acc_out = buf_out.get_access<sycl::access::mode::read_write>(cgh);
+            auto acc_temp = sycl::accessor<char, 1, sycl::access::mode::read_write,
+                    sycl::access::target::local>(64*5*32, cgh);
+            cgh.parallel_for<class write>(
+                    sycl::nd_range<1>{sycl::range<1>{((n*m*l+63)/64+31)/32*32}, sycl::range<1>{32}},
+                    [=](sycl::nd_item<1> nd_item) {
+                auto start_index = nd_item.get_global_id(0) * 64;
+                if (start_index < n*m*l) {
+                    auto o = static_cast<char*>(acc_temp.get_pointer()) + nd_item.get_local_id(0)*64*5;
+                    writev(static_cast<const uint32_t*>(acc_in.get_pointer()) + start_index, o);
+                    memcpy(static_cast<char*>(acc_out.get_pointer()) + start_index*5, o, 64*5);
+                }
+            });
+        });
+        q.submit([&](sycl::handler &cgh) {
+            auto buf_acc = buf_in.get_access<sycl::access::mode::read_write>(cgh);
+            cgh.update_host(buf_acc);
+        });
+        q.wait();
     }
 
-    auto out_size = o-static_cast<char*>(buf_out);
+    auto out_size = out_maxsize;//o-static_cast<char*>(mem_out);
 
-    if (munmap(buf_out, out_maxsize) == -1) die("munmap");
+    if (munmap(mem_out, out_maxsize) == -1) die("munmap");
     if (ftruncate(fd_out, out_size) == -1) die("ftruncate");
     if (close(fd_out) == -1) die("close");
     if (munmap(mem_in, in_size) == -1) die("munmap");

@@ -48,8 +48,8 @@ struct positional_bits_repr;
 template<typename T>
 struct positional_bits_repr<T, std::enable_if_t<std::is_floating_point_v<T>>> {
     constexpr static unsigned sign_bits = float_bits_traits<T>::sign_bits;
-    constexpr static unsigned exponent_bits = float_bits_traits<T>::exponent_bits - 3;
-    constexpr static unsigned mantissa_bits = float_bits_traits<T>::mantissa_bits + 3;
+    constexpr static unsigned exponent_bits = float_bits_traits<T>::exponent_bits;
+    constexpr static unsigned mantissa_bits = float_bits_traits<T>::mantissa_bits;
 
     using numeric_type = T;
     using bits_type = typename float_bits_traits<T>::bits_type;
@@ -115,6 +115,7 @@ void xt1d(T *x, size_t n) {
 template<typename T>
 NOINLINE
 void xt2d_0(T *x, size_t n, size_t m) {
+#pragma omp parallel for
     for (size_t i = 0; i < n/block*block; i += block) {
         T a[block], b[block];
         for (size_t j = 0; j < block; ++j) {
@@ -136,6 +137,7 @@ void xt2d_0(T *x, size_t n, size_t m) {
 template<typename T>
 NOINLINE
 void xt2d_1(T *x, size_t n, size_t m) {
+#pragma omp parallel for
     for (size_t i = 0; i < m/block*block; i += block) {
         T a[block], b[block];
         for (size_t j = 0; j < block; ++j) {
@@ -163,6 +165,7 @@ void xt2d(T *x, size_t n, size_t m) {
 template<typename T>
 NOINLINE
 void xt3d_0(T *x, size_t n, size_t m, size_t l) {
+#pragma omp parallel for
     for (size_t i = 0; i < n*m/block*block; i += block) {
         T a[block], b[block];
         for (size_t j = 0; j < block; ++j) {
@@ -184,6 +187,7 @@ void xt3d_0(T *x, size_t n, size_t m, size_t l) {
 template<typename T>
 NOINLINE
 void xt3d_1(T *x, size_t n, size_t m, size_t l) {
+#pragma omp parallel for
     for (size_t i = 0; i < n; ++i) {
         for (size_t j = 0; j < l/block*block; j += block) {
             T a[block], b[block];
@@ -207,6 +211,7 @@ void xt3d_1(T *x, size_t n, size_t m, size_t l) {
 template<typename T>
 NOINLINE
 void xt3d_2(T *x, size_t n, size_t m, size_t l) {
+#pragma omp parallel for
     for (size_t i = 0; i < m*l/block*block; i += block) {
         T a[block], b[block];
         for (size_t j = 0; j < block; ++j) {
@@ -236,7 +241,7 @@ void xt3d(T *x, size_t n, size_t m, size_t l) {
 NOINLINE
 size_t writev(uint32_t *vs, char *out0) {
     auto out = out0;
-    for (unsigned i = 0; i < 64; i += 2) {
+    for (unsigned i = 0; i < 256; i += 2) {
         unsigned length_codes[2];
         for (unsigned j = 0; j < 2; ++j) {
             if (vs[i+j]) {
@@ -253,7 +258,7 @@ size_t writev(uint32_t *vs, char *out0) {
     store(out, 0);
     unsigned bit_pos = 0;
 
-    for (unsigned i = 0; i < 64; i += 1) {
+    for (unsigned i = 0; i < 256; i += 1) {
         if (vs[i]) {
             auto lz = __builtin_clz(vs[i]) ;
             auto n_bits = lz >= 14 ? 18 : 31 - lz;
@@ -300,6 +305,9 @@ int main(int argc, char **argv) {
     auto buf_in = static_cast<uint32_t*>(mmap(NULL, in_size, PROT_READ|PROT_WRITE, MAP_PRIVATE, fd_in, 0));
     if (buf_in == MAP_FAILED) die("mmap");
 
+    for (size_t i = 0; i < n*m*l; ++i) {
+        buf_in[i] = positional_bits_repr<float>::to_bits(buf_in[i]);
+    }
     if (dims == 1) {
         xt1d(buf_in, n);
     } else if (dims == 2) {
@@ -318,7 +326,7 @@ int main(int argc, char **argv) {
     if (buf_out == MAP_FAILED) die("mmap");
 
     auto o = static_cast<char*>(buf_out);
-    for (size_t i = 0; i < n*m*l; i += 64) {
+    for (size_t i = 0; i < n*m*l; i += 256) {
         o += writev(buf_in + i, o);
     }
 
