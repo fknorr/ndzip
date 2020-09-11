@@ -281,6 +281,30 @@ size_t writev(uint32_t *vs, char *out0) {
 }
 
 
+size_t writev_shuffle(uint32_t *vs, char *const out0) {
+    uint32_t *out = (uint32_t*) out0;
+    for (unsigned i = 0; i < 8; ++i) {
+        uint32_t shifted[32] = {0};
+        for (unsigned i = 0; i < 32; ++i) {
+            for (unsigned j = 0; j < 32; ++j) {
+                shifted[i] = (shifted[i] << 1) | ((vs[j] >> i) & 1);
+            }
+        }
+        unsigned nonzero = 0;
+        auto head = out;
+        for (unsigned i = 0; i < 32; ++i) {
+            nonzero += shifted[i] != 0;
+            *head |= (shifted[i] != 0) << i;
+            if (shifted[i] != 0) {
+                *out++ = shifted[i];
+            }
+        }
+        vs += 32;
+    }
+    return (char*)out - out0;
+}
+
+
 void die(const char *what) {
     perror(what);
     exit(1);
@@ -327,7 +351,7 @@ int main(int argc, char **argv) {
 
     auto o = static_cast<char*>(buf_out);
     for (size_t i = 0; i < n*m*l; i += 256) {
-        o += writev(buf_in + i, o);
+        o += writev_shuffle(buf_in + i, o);
     }
 
     auto out_size = o-static_cast<char*>(buf_out);
