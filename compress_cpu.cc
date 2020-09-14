@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <immintrin.h>
 #include <limits.h>
 #include <algorithm>
 #include <type_traits>
@@ -281,17 +282,108 @@ size_t writev(uint32_t *vs, char *out0) {
 }
 
 
+void transpose32_trivial(uint32_t *__restrict vs, uint32_t *__restrict out) {
+    for (unsigned i = 0; i < 32; ++i) {
+        out[i] = 0;
+        for (unsigned j = 0; j < 32; ++j) {
+            out[i] |= ((vs[j] >> (31-i)) & 1) << (31-j);
+        }
+    }
+}
+
+
+void transpose32_avx(uint32_t *__restrict vs, uint32_t *__restrict out) {
+    __m256 in[4];
+    __builtin_memcpy(&in, vs, sizeof in);
+    uint8_t *out_bytes = reinterpret_cast<uint8_t*>(out);
+    for (unsigned i = 0; i < 32; ++i) {
+        for (unsigned j = 0; j < 4; ++j) {
+            uint8_t mask = _mm256_movemask_ps(in[j]);
+            out_bytes[4*i + 3-j] = mask;
+        }
+        for (unsigned j = 0; j < 4; ++j) {
+            auto v2 = _mm256_castps_si256(in[j]);
+            v2 = _mm256_slli_epi32(v2, 1);
+            in[j] = _mm256_castsi256_ps(v2);
+        }
+    }
+}
+
+void transpose32_avx2_bytes(uint32_t *__restrict vs, uint32_t *__restrict out) {
+    __m256i unpck0[4];
+    __builtin_memcpy(unpck0, vs, sizeof unpck0);
+
+    // 1. In order to generate 32 transpositions using only 32 *movemask* instructions,
+    // first shuffle bytes so that the i-th 256-bit vector contains the i-th byte of
+    // each float
+
+    __m256i shuf[4];
+    {
+        // interpret each 128-bit lane as a 4x4 matrix and transpose it
+        // also correct endianess for later
+        uint8_t idx8[] = {
+            3, 7, 11, 15, 2, 6, 10, 14, 1, 5, 9, 13, 0, 4, 8, 12,
+            3, 7, 11, 15, 2, 6, 10, 14, 1, 5, 9, 13, 0, 4, 8, 12,
+            // 0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15
+            // 0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15
+        };
+        __m256i idx;
+        __builtin_memcpy(&idx, idx8, sizeof idx);
+        for (unsigned i = 0; i < 4; ++i) {
+            shuf[i] = _mm256_shuffle_epi8(unpck0[i], idx);
+        }
+    }
+
+    __m256i perm[4];
+    {
+        // interleave doublewords within each 256-bit vector
+        // quadword i will contain elements {i, i+4, i+8, ... i+28}
+        uint32_t idx32[] = {0, 4, 1, 5, 2, 6, 3, 7};
+        __m256i idx;
+        __builtin_memcpy(&idx, idx32, sizeof idx);
+        for (unsigned i = 0; i < 4; ++i) {
+            perm[i] = _mm256_permutevar8x32_epi32(shuf[i], idx);
+        }
+    }
+
+    __m256i unpck1[4];
+    for (unsigned i = 0; i < 4; i += 2) {
+        // interleave quadwords of neighboring 256-bit vectors
+        // each double-quadword will contain elements with stride 4
+        unpck1[i+1] = _mm256_unpackhi_epi64(perm[i+0], perm[i+1]);
+        unpck1[i+0] = _mm256_unpacklo_epi64(perm[i+0], perm[i+1]);
+    }
+
+    __m256i perm2[4] = {0};
+    {
+        // combine matching 128-bit lanes
+        perm2[0] = _mm256_permute2x128_si256(unpck1[0], unpck1[2], 0x20);
+        perm2[1] = _mm256_permute2x128_si256(unpck1[1], unpck1[3], 0x20);
+        perm2[2] = _mm256_permute2x128_si256(unpck1[0], unpck1[2], 0x31);
+        perm2[3] = _mm256_permute2x128_si256(unpck1[1], unpck1[3], 0x31);
+    }
+
+    // 2. Transpose by extracting the 32 MSBs of each byte of each 256-byte vector
+
+    for (unsigned i = 0; i < 4; ++i) {
+        for (unsigned j = 0; j < 8; ++j) {
+            out[i*8+j] = _mm256_movemask_epi8(perm2[i]);
+            perm2[i] = _mm256_slli_epi32(perm2[i], 1);
+        }
+    }
+}
+
+
+
+[[gnu::noinline]]
 size_t writev_shuffle(uint32_t *vs, char *const out0) {
     uint32_t *out = (uint32_t*) out0;
     for (unsigned i = 0; i < 8; ++i) {
-        uint32_t shifted[32] = {0};
-        for (unsigned i = 0; i < 32; ++i) {
-            for (unsigned j = 0; j < 32; ++j) {
-                shifted[i] = (shifted[i] << 1) | ((vs[j] >> i) & 1);
-            }
-        }
+        uint32_t shifted[32];
+        transpose32_avx2_bytes(vs, shifted);
         unsigned nonzero = 0;
-        auto head = out;
+        auto head = out++;
+        *head = 0;
         for (unsigned i = 0; i < 32; ++i) {
             nonzero += shifted[i] != 0;
             *head |= (shifted[i] != 0) << i;
