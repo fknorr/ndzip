@@ -354,14 +354,13 @@ void transpose32_avx2_bytes(uint32_t *__restrict vs, uint32_t *__restrict out) {
         unpck1[i+0] = _mm256_unpacklo_epi64(perm[i+0], perm[i+1]);
     }
 
-    __m256i perm2[4] = {0};
-    {
+    __m256i perm2[4] = {
         // combine matching 128-bit lanes
-        perm2[0] = _mm256_permute2x128_si256(unpck1[0], unpck1[2], 0x20);
-        perm2[1] = _mm256_permute2x128_si256(unpck1[1], unpck1[3], 0x20);
-        perm2[2] = _mm256_permute2x128_si256(unpck1[0], unpck1[2], 0x31);
-        perm2[3] = _mm256_permute2x128_si256(unpck1[1], unpck1[3], 0x31);
-    }
+        _mm256_permute2x128_si256(unpck1[0], unpck1[2], 0x20),
+        _mm256_permute2x128_si256(unpck1[1], unpck1[3], 0x20),
+        _mm256_permute2x128_si256(unpck1[0], unpck1[2], 0x31),
+        _mm256_permute2x128_si256(unpck1[1], unpck1[3], 0x31),
+    };
 
     // 2. Transpose by extracting the 32 MSBs of each byte of each 256-byte vector
 
@@ -374,6 +373,87 @@ void transpose32_avx2_bytes(uint32_t *__restrict vs, uint32_t *__restrict out) {
 }
 
 
+unsigned compact32_trivial(const uint32_t *shifted, uint32_t *out) {
+    unsigned nonzero = 0;
+    auto head = out++;
+    *head = 0;
+    unsigned pos[32];
+    for (unsigned i = 0; i < 32; ++i) {
+        pos[i] = nonzero;
+        nonzero += shifted[i] != 0;
+        *head |= (shifted[i] != 0) << i;
+    }
+    for (unsigned i = 0; i < 32; ++i) {
+        out[i] = shifted[pos[i]];
+    }
+    return 1 + nonzero;
+}
+
+
+void prefix_sum(const __m256i *in, uint32_t *out) {
+    using v8 = uint32_t __attribute__((vector_size(32)));
+
+    v8 v[4];
+    __builtin_memcpy(v, in, sizeof v);
+
+    for (unsigned i = 1; i < 8; ++i) {
+        v[0][i] += v[0][i-1];
+    }
+    v[1][0] += v[0][7];
+    for (unsigned i = 1; i < 8; ++i) {
+        v[1][i] += v[1][i-1];
+    }
+    v[2][0] += v[1][7];
+    for (unsigned i = 1; i < 8; ++i) {
+        v[2][i] += v[2][i-1];
+    }
+    v[3][0] += v[2][7];
+    for (unsigned i = 1; i < 8; ++i) {
+        v[3][i] += v[3][i-1];
+    }
+
+    __builtin_memcpy(out, v, sizeof v);
+}
+
+
+[[gnu::always_inline]]
+unsigned compact32_avx2(const uint32_t *shifted, uint32_t *out) {
+    __m256i in[4];
+    __builtin_memcpy(in, shifted, sizeof in);
+
+    __m256i eq[4];
+    const __m256i zero = {0};
+    for (unsigned i = 0; i < 4; ++i) {
+        eq[i] = _mm256_cmpeq_epi32(in[i], zero);
+    }
+
+    uint32_t mask = 0;
+    __m256i eq_counts[4];
+    {
+        const uint32_t ones32[] = {1, 1, 1, 1, 1, 1, 1, 1};
+        __m256i ones;
+        __builtin_memcpy(&ones, ones32, sizeof ones);
+
+        for (unsigned i = 0; i < 4; ++i) {
+            mask = (mask << 8) | _mm256_movemask_ps(_mm256_castsi256_ps(eq[i]));
+            eq_counts[i] = _mm256_andnot_si256(eq[i], ones);
+        }
+    }
+
+    *out = mask;
+
+    uint32_t pos[32];
+    prefix_sum(eq_counts, pos);
+
+    __builtin_memcpy(pos, pos, sizeof pos);
+
+    for (unsigned i = 0; i < 32; ++i) {
+        out[pos[31-i]] = shifted[31-i];
+    }
+
+    return 1 + pos[31];
+}
+
 
 [[gnu::noinline]]
 size_t writev_shuffle(uint32_t *vs, char *const out0) {
@@ -381,16 +461,7 @@ size_t writev_shuffle(uint32_t *vs, char *const out0) {
     for (unsigned i = 0; i < 8; ++i) {
         uint32_t shifted[32];
         transpose32_avx2_bytes(vs, shifted);
-        unsigned nonzero = 0;
-        auto head = out++;
-        *head = 0;
-        for (unsigned i = 0; i < 32; ++i) {
-            nonzero += shifted[i] != 0;
-            *head |= (shifted[i] != 0) << i;
-            if (shifted[i] != 0) {
-                *out++ = shifted[i];
-            }
-        }
+        out += compact32_trivial(shifted, out);
         vs += 32;
     }
     return (char*)out - out0;
