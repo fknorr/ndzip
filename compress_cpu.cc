@@ -309,7 +309,8 @@ void transpose32_avx(uint32_t *__restrict vs, uint32_t *__restrict out) {
     }
 }
 
-void transpose32_avx2_bytes(uint32_t *__restrict vs, uint32_t *__restrict out) {
+[[gnu::always_inline]]
+inline void transpose32_avx2_bytes(uint32_t *__restrict vs, uint32_t *__restrict out) {
     __m256i unpck0[4];
     __builtin_memcpy(unpck0, vs, sizeof unpck0);
 
@@ -373,85 +374,93 @@ void transpose32_avx2_bytes(uint32_t *__restrict vs, uint32_t *__restrict out) {
 }
 
 
-unsigned compact32_trivial(const uint32_t *shifted, uint32_t *out) {
-    unsigned nonzero = 0;
-    auto head = out++;
-    *head = 0;
-    unsigned pos[32];
-    for (unsigned i = 0; i < 32; ++i) {
-        pos[i] = nonzero;
-        nonzero += shifted[i] != 0;
-        *head |= (shifted[i] != 0) << i;
-    }
-    for (unsigned i = 0; i < 32; ++i) {
-        out[i] = shifted[pos[i]];
-    }
-    return 1 + nonzero;
+[[gnu::always_inline]]
+inline __m256i m256i_literal_8(std::initializer_list<uint8_t> bytes) {
+    __m256i v;
+    __builtin_memcpy(&v, bytes.begin(), sizeof v);
+    return v;
 }
-
-
-void prefix_sum(const __m256i *in, uint32_t *out) {
-    using v8 = uint32_t __attribute__((vector_size(32)));
-
-    v8 v[4];
-    __builtin_memcpy(v, in, sizeof v);
-
-    for (unsigned i = 1; i < 8; ++i) {
-        v[0][i] += v[0][i-1];
-    }
-    v[1][0] += v[0][7];
-    for (unsigned i = 1; i < 8; ++i) {
-        v[1][i] += v[1][i-1];
-    }
-    v[2][0] += v[1][7];
-    for (unsigned i = 1; i < 8; ++i) {
-        v[2][i] += v[2][i-1];
-    }
-    v[3][0] += v[2][7];
-    for (unsigned i = 1; i < 8; ++i) {
-        v[3][i] += v[3][i-1];
-    }
-
-    __builtin_memcpy(out, v, sizeof v);
-}
-
 
 [[gnu::always_inline]]
-unsigned compact32_avx2(const uint32_t *shifted, uint32_t *out) {
-    __m256i in[4];
-    __builtin_memcpy(in, shifted, sizeof in);
+inline __m256i m256i_literal_32(std::initializer_list<uint32_t> dwords) {
+    __m256i v;
+    __builtin_memcpy(&v, dwords.begin(), sizeof v);
+    return v;
+}
 
-    __m256i eq[4];
+[[gnu::always_inline]]
+inline unsigned compact32_avx2(const uint32_t *__restrict transposed, uint32_t *__restrict out) {
+    __m256i in[4];
+    __builtin_memcpy(in, transposed, sizeof in);
+
     const __m256i zero = {0};
+    __m256i eq[4];
     for (unsigned i = 0; i < 4; ++i) {
         eq[i] = _mm256_cmpeq_epi32(in[i], zero);
     }
 
-    uint32_t mask = 0;
-    __m256i eq_counts[4];
-    {
-        const uint32_t ones32[] = {1, 1, 1, 1, 1, 1, 1, 1};
-        __m256i ones;
-        __builtin_memcpy(&ones, ones32, sizeof ones);
-
-        for (unsigned i = 0; i < 4; ++i) {
-            mask = (mask << 8) | _mm256_movemask_ps(_mm256_castsi256_ps(eq[i]));
-            eq_counts[i] = _mm256_andnot_si256(eq[i], ones);
-        }
+    __m256i neq_masked[4];
+    auto squash_mask = m256i_literal_8({
+            1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
+            1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1
+            });
+    for (unsigned i = 0; i < 4; ++i) {
+        neq_masked[i] = _mm256_andnot_si256(eq[i], squash_mask);
     }
 
-    *out = mask;
+    __m256i neq_squash0[4];
+    for (unsigned i = 0; i < 4; ++i) {
+        neq_squash0[i] = _mm256_hadd_epi32(_mm256_hadd_epi32(neq_masked[i], zero), zero);
+    }
 
-    uint32_t pos[32];
-    prefix_sum(eq_counts, pos);
+    __m256i neq_squash1 = _mm256_or_si256(
+            _mm256_or_si256(
+                _mm256_permutevar8x32_epi32(neq_squash0[0], m256i_literal_32({0, 4, 1, 1, 1, 1, 1, 1})),
+                _mm256_permutevar8x32_epi32(neq_squash0[1], m256i_literal_32({1, 1, 0, 4, 1, 1, 1, 1}))
+                ),
+            _mm256_or_si256(
+                _mm256_permutevar8x32_epi32(neq_squash0[2], m256i_literal_32({1, 1, 1, 1, 0, 4, 1, 1})),
+                _mm256_permutevar8x32_epi32(neq_squash0[3], m256i_literal_32({1, 1, 1, 1, 1, 1, 0, 4}))
+                ));
 
-    __builtin_memcpy(pos, pos, sizeof pos);
+    auto mask = static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_sub_epi8(zero, neq_squash1)));
+
+    __m256i lanes = neq_squash1;
+    lanes = _mm256_add_epi8(lanes, _mm256_slli_si256(lanes, 1));
+    lanes = _mm256_add_epi8(lanes, _mm256_slli_si256(lanes, 2));
+    lanes = _mm256_add_epi8(lanes, _mm256_slli_si256(lanes, 4));
+    lanes = _mm256_add_epi8(lanes, _mm256_slli_si256(lanes, 8));
+
+    __m128i low = _mm_broadcastb_epi8(_mm_srli_si128(_mm256_extractf128_si256(lanes, 0), 15));
+    __m256i prefix_sum = _mm256_add_epi8(lanes, _mm256_insertf128_si256(zero, low, 1));
+
+    unsigned total = _mm256_extract_epi8(prefix_sum, 31);
+
+    uint8_t offsets[32];
+    __builtin_memcpy(offsets, &prefix_sum, 32);
 
     for (unsigned i = 0; i < 32; ++i) {
-        out[pos[31-i]] = shifted[31-i];
+        out[offsets[31-i]] = transposed[31-i];
     }
+    out[0] = mask;
 
-    return 1 + pos[31];
+    return 1+total;
+}
+
+
+[[gnu::always_inline]]
+inline unsigned compact32_trivial(const uint32_t *shifted, uint32_t *out) {
+    unsigned nonzero = 0;
+    auto head = out++;
+    *head = 0;
+    for (unsigned i = 0; i < 32; ++i) {
+        if (shifted[i] != 0) {
+            ++nonzero;
+            *head |= 1u << i;
+            *out++ = shifted[i];
+        }
+    }
+    return 1 + nonzero;
 }
 
 
@@ -461,6 +470,8 @@ size_t writev_shuffle(uint32_t *vs, char *const out0) {
     for (unsigned i = 0; i < 8; ++i) {
         uint32_t shifted[32];
         transpose32_avx2_bytes(vs, shifted);
+        // out += compact32_avx2(shifted, out);
+        // transpose32_trivial(vs, shifted);
         out += compact32_trivial(shifted, out);
         vs += 32;
     }
