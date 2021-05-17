@@ -1,5 +1,5 @@
+#include "test_utils.hh"
 #include <ndzip/sycl_bits.hh>
-#include <test/test_utils.hh>
 
 using namespace ndzip;
 using namespace ndzip::detail;
